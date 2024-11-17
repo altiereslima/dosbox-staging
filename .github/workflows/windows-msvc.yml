@@ -71,23 +71,23 @@ jobs:
             vs-prerelease: true
             msbuild-architecture: ${{ matrix.conf.arch }}
 
-      - name:  Integrate packages
+      - name: Integrate packages
         shell: pwsh
         run: |
           ${{ env.VCPKG_ROOT }}\vcpkg.exe integrate install
           if (-not $?) { throw "vcpkg failed to integrate packages" }
 
-      - name:  Log environment
+      - name: Log environment
         shell: pwsh
-        run:   .\scripts\log-env.ps1
+        run: .\scripts\log-env.ps1
 
-      - name:  Run tests
+      - name: Run tests
         shell: pwsh
         run: |
           cd vs
           MSBuild -m dosbox.sln -t:tests:Rebuild -p:Configuration=Debug -p:Platform=${{ matrix.conf.arch }}
 
-      - name:  Build
+      - name: Build
         shell: pwsh
         run: |
           cd vs
@@ -98,7 +98,7 @@ jobs:
         shell: pwsh
         run: Get-Content -Path vcpkg_installed/${{ matrix.conf.arch }}-windows/vcpkg/issue_body.md
 
-      - name:  Summarize warnings
+      - name: Summarize warnings
         shell: pwsh
         env:
           MAX_WARNINGS: ${{ matrix.conf.max_warnings }}
@@ -148,18 +148,18 @@ jobs:
             vs-prerelease: true
             msbuild-architecture: ${{ matrix.arch }}
 
-      - name:  Integrate packages
+      - name: Integrate packages
         shell: pwsh
         run: |
           ${{ env.VCPKG_ROOT }}\vcpkg.exe integrate install
           if (-not $?) { throw "vcpkg failed to integrate packages" }
 
-      - name:  Log environment
+      - name: Log environment
         shell: pwsh
-        run:   .\scripts\log-env.ps1
+        run: .\scripts\log-env.ps1
 
-      - name:  Set variables
-        id:    set_vars
+      - name: Set variables
+        id: set_vars
         shell: bash
         run: |
           set -x
@@ -169,14 +169,14 @@ jobs:
           echo "pkg_dir=dosbox-staging-windows-${{ matrix.arch }}-${VERSION}" >> $GITHUB_OUTPUT
           echo "dosbox_version=${VERSION}" >> $GITHUB_OUTPUT
 
-      - name:  Set the Git hash in config.h
+      - name: Set the Git hash in config.h
         shell: bash
         run: |
           set -x
           GIT_HASH=$(./scripts/get-version.sh hash)
           sed -i "s|BUILD_GIT_HASH \"git\"|BUILD_GIT_HASH \"$GIT_HASH\"|" src/platform/visualc/config.h
 
-      - name:  Enable the debugger in config.h
+      - name: Enable the debugger in config.h
         if: ${{ matrix.debugger }}
         shell: bash
         run: |
@@ -184,7 +184,7 @@ jobs:
           sed -i "s|C_DEBUG.*|C_DEBUG 1|"             src/platform/visualc/config.h
           sed -i "s|C_HEAVY_DEBUG.*|C_HEAVY_DEBUG 1|" src/platform/visualc/config.h
 
-      - name:  Build release
+      - name: Build release
         shell: pwsh
         run: |
           cd vs
@@ -224,35 +224,32 @@ jobs:
             ${{ steps.set_vars.outputs.pkg_dir }}
 
       - name: Upload package
-        if:   ${{ !matrix.debugger }}
+        if: ${{ !matrix.debugger }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.set_vars.outputs.pkg_dir }}-without-debugger
           path: ${{ steps.set_vars.outputs.pkg_dir }}
           overwrite: true
 
-
-      - name:  Package the debugger build
-        if:    ${{ matrix.debugger }}
+      - name: Package the debugger build
+        if: ${{ matrix.debugger }}
         shell: bash
         run: |
           set -x
           mkdir -p ${{ steps.set_vars.outputs.pkg_dir }}
           # Move the debugger build into the release area
-          ls ${{ steps.set_vars.outputs.build_dir }}
           cp ${{ steps.set_vars.outputs.build_dir }}/dosbox.exe ${{ steps.set_vars.outputs.pkg_dir }}/dosbox_with_debugger.exe
 
       - name: Upload debugger artifact
-        if:   ${{ matrix.debugger }}
+        if: ${{ matrix.debugger }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.set_vars.outputs.pkg_dir }}-with-debugger
           path: ${{ steps.set_vars.outputs.pkg_dir }}/dosbox_with_debugger.exe
           overwrite: true
 
-
   merge_artifacts:
-    name: Merge release & debugger artifacts (${{ matrix.arch }} )
+    name: Merge release & debugger artifacts (${{ matrix.arch }})
     needs: build_windows_vs_release
     outputs:
       dosbox_version: ${{ needs.build_windows_vs_release.outputs.dosbox_version }}
@@ -262,16 +259,20 @@ jobs:
       matrix:
         arch: [x64, ARM64]
     steps:
-      - name: Merge artifacts (${{ matrix.arch }} )
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Merge artifacts (${{ matrix.arch }})
         uses: actions/upload-artifact/merge@v4
         with:
-          name:    dosbox-staging-windows-${{ matrix.arch }}-${{ needs.build_windows_vs_release.outputs.dosbox_version }}
-          pattern: dosbox-staging-windows-${{ matrix.arch }}-*
+          name: dosbox-staging-windows-${{ matrix.arch }}-${{ needs.build_windows_vs_release.outputs.dosbox_version }}
+          pattern: artifacts/dosbox-staging-windows-${{ matrix.arch }}-*
           delete-merged: 'true'
 
-
   build_installer:
-    name: Build installer (${{ matrix.arch }} )
+    name: Build installer (${{ matrix.arch }})
     needs: merge_artifacts
     runs-on: windows-2022
     strategy:
@@ -288,8 +289,8 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
 
-      - name:  Set variables
-        id:    set_vars
+      - name: Set variables
+        id: set_vars
         shell: bash
         run: |
           set -x
@@ -305,7 +306,7 @@ jobs:
 
           mkdir -p out/program
 
-          sed -e "s|%PACKAGE_INFORMATION%|${PACKAGE_INFO}|;s|%GITHUB_REPO%|${{ github.repository }}|" docs/README.template >out/setup_preamble.txt
+          sed -e "s|%PACKAGE_INFORMATION%|${PACKAGE_INFO}|;s|%GITHUB_REPO%|${{ github.repository }}|" docs/README.template > out/setup_preamble.txt
           sed -i "s|DOSBOX-STAGING-VERSION|${VERSION}|" contrib/windows_installer/DOSBox-Staging-setup.iss
 
           cp contrib/windows_installer/*                   out
@@ -314,7 +315,7 @@ jobs:
           cp contrib/icons/windows/dosbox-staging-side.bmp out
 
           mv ${{ steps.set_vars.outputs.pkg_dir }}/*       out/program
-          mv out/program/dosbox*.exe                       out
+          mv out/program/dosbox*.exe                      out
 
       - name: Build Windows installer
         shell: pwsh
