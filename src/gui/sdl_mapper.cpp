@@ -611,407 +611,321 @@ static void set_joystick_led([[maybe_unused]] SDL_Joystick *joystick,
 
 class CStickBindGroup : public CBindGroup {
 public:
-	CStickBindGroup(int _stick_index, uint8_t _emustick, bool _dummy = false)
-	        : CBindGroup(),
-	          stick_index(_stick_index), // the number of the device in the system
-	          emustick(_emustick), // the number of the emulated device
-	          is_dummy(_dummy)
-	{
-		sprintf(configname, "stick_%u", static_cast<unsigned>(emustick));
-		if (is_dummy)
-			return;
+    CStickBindGroup(int _stick_index, uint8_t _emustick, bool _dummy = false)
+        : CBindGroup(),
+          stick_index(_stick_index),
+          emustick(_emustick),
+          is_dummy(_dummy)
+    {
+        sprintf(configname, "stick_%u", static_cast<unsigned>(emustick));
+        if (is_dummy)
+            return;
 
-		// initialize binding lists and position data
-		pos_axis_lists = new CBindList[MAXAXIS];
-		neg_axis_lists = new CBindList[MAXAXIS];
-		button_lists = new CBindList[MAXBUTTON];
-		hat_lists = new CBindList[4];
+        // Initialize binding lists and position data
+        pos_axis_lists = new CBindList[MAXAXIS];
+        neg_axis_lists = new CBindList[MAXAXIS];
+        button_lists = new CBindList[MAXBUTTON];
+        hat_lists = new CBindList[4];
 
-		// initialize emulated joystick state
-		emulated_axes=2;
-		emulated_buttons=2;
-		emulated_hats=0;
-		JOYSTICK_Enable(emustick,true);
+        // Initialize emulated joystick state
+        emulated_axes = 2;
+        emulated_buttons = 2;
+        emulated_hats = 0;
+        JOYSTICK_Enable(emustick, true);
 
-		// From the SDL doco
-		// (https://wiki.libsdl.org/SDL2/SDL_JoystickOpen):
+        sdl_joystick = SDL_JoystickOpen(stick_index);
+        stick_id = SDL_JoystickInstanceID(sdl_joystick);
 
-		// The device_index argument refers to the N'th joystick presently
-		// recognized by SDL on the system. It is NOT the same as the
-		// instance ID used to identify the joystick in future events.
+        set_joystick_led(sdl_joystick, on_color);
+        if (sdl_joystick == nullptr) {
+            button_wrap = emulated_buttons;
+            axes = MAXAXIS;
+            return;
+        }
 
-		// Also see: https://wiki.libsdl.org/SDL2/SDL_JoystickInstanceID
+        const int sdl_axes = SDL_JoystickNumAxes(sdl_joystick);
+        if (sdl_axes < 0)
+            LOG_MSG("SDL: Can't detect axes; %s", SDL_GetError());
+        axes = clamp(sdl_axes, 0, MAXAXIS);
 
-		// We refer to the device index as `stick_index`, and to the
-		// instance ID as `stick_id`.
+        const int sdl_hats = SDL_JoystickNumHats(sdl_joystick);
+        if (sdl_hats < 0)
+            LOG_MSG("SDL: Can't detect hats; %s", SDL_GetError());
+        hats = clamp(sdl_hats, 0, MAXHAT);
 
-		sdl_joystick = SDL_JoystickOpen(stick_index);
-		stick_id = SDL_JoystickInstanceID(sdl_joystick);
+        buttons = SDL_JoystickNumButtons(sdl_joystick); // TODO returns -1 on error
+        button_wrap = buttons;
+        button_cap = buttons;
+        if (button_wrapping_enabled) {
+            button_wrap = emulated_buttons;
+            if (buttons > MAXBUTTON_CAP) button_cap = MAXBUTTON_CAP;
+        }
+        if (button_wrap > MAXBUTTON)
+            button_wrap = MAXBUTTON;
 
-		set_joystick_led(sdl_joystick, on_color);
-		if (sdl_joystick==nullptr) {
-			button_wrap=emulated_buttons;
-			axes=MAXAXIS;
-			return;
-		}
+        LOG_MSG("MAPPER: Initialised %s with %d axes, %d buttons, and %d hat(s)",
+                SDL_JoystickNameForIndex(stick_index), axes, buttons, hats);
 
-		const int sdl_axes = SDL_JoystickNumAxes(sdl_joystick);
-		if (sdl_axes < 0)
-			LOG_MSG("SDL: Can't detect axes; %s", SDL_GetError());
-		axes = clamp(sdl_axes, 0, MAXAXIS);
+        DetectTriggerButtons();
+    }
 
-		const int sdl_hats = SDL_JoystickNumHats(sdl_joystick);
-		if (sdl_hats < 0)
-			LOG_MSG("SDL: Can't detect hats; %s", SDL_GetError());
-		hats = clamp(sdl_hats, 0, MAXHAT);
+    ~CStickBindGroup() override {
+        set_joystick_led(sdl_joystick, off_color);
+        SDL_JoystickClose(sdl_joystick);
+        sdl_joystick = nullptr;
 
-		buttons = SDL_JoystickNumButtons(sdl_joystick); // TODO returns -1 on error
-		button_wrap = buttons;
-		button_cap = buttons;
-		if (button_wrapping_enabled) {
-			button_wrap=emulated_buttons;
-			if (buttons>MAXBUTTON_CAP) button_cap = MAXBUTTON_CAP;
-		}
-		if (button_wrap > MAXBUTTON)
-			button_wrap = MAXBUTTON;
+        delete[] pos_axis_lists;
+        pos_axis_lists = nullptr;
 
-		LOG_MSG("MAPPER: Initialised %s with %d axes, %d buttons, and %d hat(s)",
-		        SDL_JoystickNameForIndex(stick_index), axes, buttons, hats);
+        delete[] neg_axis_lists;
+        neg_axis_lists = nullptr;
 
-		// Trigger buttons that are actually analogue axis need special handling
-		// This function detects such triggers and sets the is_trigger variable for them
-		DetectTriggerButtons();
-	}
+        delete[] button_lists;
+        button_lists = nullptr;
 
-	~CStickBindGroup() override
-	{
-		set_joystick_led(sdl_joystick, off_color);
-		SDL_JoystickClose(sdl_joystick);
-		sdl_joystick = nullptr;
+        delete[] hat_lists;
+        hat_lists = nullptr;
+    }
 
-		delete[] pos_axis_lists;
-		pos_axis_lists = nullptr;
+    CBind *CreateConfigBind(char *&buf) override {
+        if (strncasecmp(configname, buf, strlen(configname))) return nullptr;
+        strip_word(buf);
+        char *type = strip_word(buf);
+        CBind *bind = nullptr;
+        if (!strcasecmp(type, "axis")) {
+            int ax = atoi(strip_word(buf));
+            int pos = atoi(strip_word(buf));
+            bind = CreateAxisBind(ax, pos > 0); // TODO double check, previously it was != 0
+        } else if (!strcasecmp(type, "button")) {
+            int but = atoi(strip_word(buf));
+            bind = CreateButtonBind(but);
+        } else if (!strcasecmp(type, "hat")) {
+            uint8_t hat = static_cast<uint8_t>(atoi(strip_word(buf)));
+            uint8_t dir = static_cast<uint8_t>(atoi(strip_word(buf)));
+            bind = CreateHatBind(hat, dir);
+        } else if (!strcasecmp(type, "mousemove")) {
+            int ax = atoi(strip_word(buf));
+            int pos = atoi(strip_word(buf));
+            bind = CreateMouseMoveBind(ax, pos > 0); // TODO double check, previously it was != 0
+        }
+        return bind;
+    }
 
-		delete[] neg_axis_lists;
-		neg_axis_lists = nullptr;
+    CBind *CreateEventBind(SDL_Event *event) override {
+        if (event->type == SDL_MOUSEMOTION) {
+            int xrel = event->motion.xrel;
+            int yrel = event->motion.yrel;
+            if (xrel != 0) {
+                CMouseMoveEvent *x_move = new CMouseMoveEvent("mousemove_x", 0, 0, xrel > 0);
+                x_move->SetMouseMoveValue(static_cast<Sint16>(xrel));
+                return x_move;
+            }
+            if (yrel != 0) {
+                CMouseMoveEvent *y_move = new CMouseMoveEvent("mousemove_y", 0, 1, yrel > 0);
+                y_move->SetMouseMoveValue(static_cast<Sint16>(yrel));
+                return y_move;
+            }
+        } else if (event->type == SDL_JOYAXISMOTION) {
+            const int axis_id = event->jaxis.axis;
+            const auto axis_position = event->jaxis.value;
 
-		delete[] button_lists;
-		button_lists = nullptr;
-
-		delete[] hat_lists;
-		hat_lists = nullptr;
-	}
-
-	CStickBindGroup(const CStickBindGroup&) = delete; // prevent copy
-	CStickBindGroup& operator=(const CStickBindGroup&) = delete; // prevent assignment
-
-	CBind * CreateConfigBind(char *& buf) override
-	{
-		if (strncasecmp(configname,buf,strlen(configname))) return nullptr;
-		strip_word(buf);
-		char *type = strip_word(buf);
-		CBind *bind = nullptr;
-		if (!strcasecmp(type,"axis")) {
-			int ax = atoi(strip_word(buf));
-			int pos = atoi(strip_word(buf));
-			bind = CreateAxisBind(ax, pos > 0); // TODO double check, previously it was != 0
-		} else if (!strcasecmp(type, "button")) {
-			int but = atoi(strip_word(buf));
-			bind = CreateButtonBind(but);
-		} else if (!strcasecmp(type, "hat")) {
-			uint8_t hat = static_cast<uint8_t>(atoi(strip_word(buf)));
-			uint8_t dir = static_cast<uint8_t>(atoi(strip_word(buf)));
-			bind = CreateHatBind(hat, dir);
-		}
-		return bind;
-	}
-
-	CBind * CreateEventBind(SDL_Event * event) override {
-		if (event->type==SDL_JOYAXISMOTION) {
-			const int axis_id = event->jaxis.axis;
-			const auto axis_position = event->jaxis.value;
-
-			if (event->jaxis.which != stick_id)
-				return nullptr;
+            if (event->jaxis.which != stick_id)
+                return nullptr;
 #if defined(REDUCE_JOYSTICK_POLLING)
-			if (axis_id >= axes)
-				return nullptr;
+            if (axis_id >= axes)
+                return nullptr;
 #endif
-			if (abs(axis_position) < 25000)
-				return nullptr;
+            if (abs(axis_position) < 25000)
+                return nullptr;
 
-			// Trigger buttons must be special cased as they have a resting position of close to -32000
-			// We only want the mapped button to be pressed while the trigger is in the positve range (more than half-way pressed)
-			const bool toggled = axis_position > 0 || is_trigger[axis_id];
-			return CreateAxisBind(axis_id, toggled);
+            const bool toggled = axis_position > 0 || is_trigger[axis_id];
+            return CreateAxisBind(axis_id, toggled);
 
-		} else if (event->type == SDL_JOYBUTTONDOWN) {
-			if (event->jbutton.which != stick_id)
-				return nullptr;
-#if defined (REDUCE_JOYSTICK_POLLING)
-			return CreateButtonBind(event->jbutton.button%button_wrap);
+        } else if (event->type == SDL_JOYBUTTONDOWN) {
+            if (event->jbutton.which != stick_id)
+                return nullptr;
+#if defined(REDUCE_JOYSTICK_POLLING)
+            return CreateButtonBind(event->jbutton.button % button_wrap);
 #else
-			return CreateButtonBind(event->jbutton.button);
+            return CreateButtonBind(event->jbutton.button);
 #endif
-		} else if (event->type==SDL_JOYHATMOTION) {
-			if (event->jhat.which != stick_id) return nullptr;
-			if (event->jhat.value == 0) return nullptr;
-			if (event->jhat.value>(SDL_HAT_UP|SDL_HAT_RIGHT|SDL_HAT_DOWN|SDL_HAT_LEFT)) return nullptr;
-			return CreateHatBind(event->jhat.hat, event->jhat.value);
-		} else return nullptr;
-	}
+        } else if (event->type == SDL_JOYHATMOTION) {
+            if (event->jhat.which != stick_id) return nullptr;
+            if (event->jhat.value == 0) return nullptr;
+            if (event->jhat.value > (SDL_HAT_UP | SDL_HAT_RIGHT | SDL_HAT_DOWN | SDL_HAT_LEFT)) return nullptr;
+            return CreateHatBind(event->jhat.hat, event->jhat.value);
+        } else return nullptr;
+    }
 
-	bool CheckEvent(SDL_Event * event) override {
-		SDL_JoyAxisEvent * jaxis = nullptr;
-		SDL_JoyButtonEvent *jbutton = nullptr;
+    bool CheckEvent(SDL_Event *event) override {
+        SDL_JoyAxisEvent *jaxis = nullptr;
+        SDL_JoyButtonEvent *jbutton = nullptr;
 
-		switch(event->type) {
-			case SDL_JOYAXISMOTION:
-				jaxis = &event->jaxis;
-				if(jaxis->which == stick_id) {
-					if(jaxis->axis == 0)
-						JOYSTICK_Move_X(emustick, jaxis->value);
-					else if (jaxis->axis == 1)
-						JOYSTICK_Move_Y(emustick, jaxis->value);
-				}
-				break;
-			case SDL_JOYBUTTONDOWN:
-			case SDL_JOYBUTTONUP:
-				jbutton = &event->jbutton;
-				bool state;
-				state = jbutton->type == SDL_JOYBUTTONDOWN;
-				const auto but = check_cast<uint8_t>(jbutton->button % emulated_buttons);
-				if (jbutton->which == stick_id) {
-					JOYSTICK_Button(emustick, but, state);
-				}
-				break;
-			}
-			return false;
-	}
+        switch (event->type) {
+            case SDL_JOYAXISMOTION:
+                jaxis = &event->jaxis;
+                if (jaxis->which == stick_id) {
+                    if (jaxis->axis == 0)
+                        JOYSTICK_Move_X(emustick, jaxis->value);
+                    else if (jaxis->axis == 1)
+                        JOYSTICK_Move_Y(emustick, jaxis->value);
+                }
+                break;
+            case SDL_JOYBUTTONDOWN:
+            case SDL_JOYBUTTONUP:
+                jbutton = &event->jbutton;
+                bool state;
+                state = jbutton->type == SDL_JOYBUTTONDOWN;
+                const auto but = check_cast<uint8_t>(jbutton->button % emulated_buttons);
+                if (jbutton->which == stick_id) {
+                    JOYSTICK_Button(emustick, but, state);
+                }
+                break;
+            case SDL_MOUSEMOTION:
+                int xrel = event->motion.xrel;
+                int yrel = event->motion.yrel;
+                if (xrel != 0) {
+                    JOYSTICK_Move_X(emustick, static_cast<Sint16>(xrel));
+                }
+                if (yrel != 0) {
+                    JOYSTICK_Move_Y(emustick, static_cast<Sint16>(yrel));
+                }
+                break;
+        }
+        return false;
+    }
 
-	virtual void UpdateJoystick() {
-		if (is_dummy) return;
-		/* query SDL joystick and activate bindings */
-		ActivateJoystickBoundEvents();
+    void UpdateJoystick() override {
+        if (is_dummy) return;
+        ActivateJoystickBoundEvents();
 
-		bool button_pressed[MAXBUTTON];
-		std::fill_n(button_pressed, MAXBUTTON, false);
-		for (int i = 0; i < MAX_VJOY_BUTTONS; i++) {
-			if (virtual_joysticks[emustick].button_pressed[i])
-				button_pressed[i % button_wrap]=true;
-		}
-		for (uint8_t i = 0; i < emulated_buttons; i++) {
-			if (autofire && (button_pressed[i]))
-				JOYSTICK_Button(emustick,i,(++button_autofire[i])&1);
-			else
-				JOYSTICK_Button(emustick,i,button_pressed[i]);
-		}
+        bool button_pressed[MAXBUTTON];
+        std::fill_n(button_pressed, MAXBUTTON, false);
+        for (int i = 0; i < MAX_VJOY_BUTTONS; i++) {
+            if (virtual_joysticks[emustick].button_pressed[i])
+                button_pressed[i % button_wrap] = true;
+        }
+        for (uint8_t i = 0; i < emulated_buttons; i++) {
+            if (autofire && (button_pressed[i]))
+                JOYSTICK_Button(emustick, i, (++button_autofire[i]) & 1);
+            else
+                JOYSTICK_Button(emustick, i, button_pressed[i]);
+        }
 
-		JOYSTICK_Move_X(emustick, virtual_joysticks[emustick].axis_pos[0]);
-		JOYSTICK_Move_Y(emustick, virtual_joysticks[emustick].axis_pos[1]);
-	}
-
-	void ActivateJoystickBoundEvents() {
-		if (sdl_joystick == nullptr) {
-			return;
-		}
-
-		bool button_pressed[MAXBUTTON];
-		std::fill_n(button_pressed, MAXBUTTON, false);
-		/* read button states */
-		for (int i = 0; i < button_cap; i++) {
-			if (SDL_JoystickGetButton(sdl_joystick, i))
-				button_pressed[i % button_wrap]=true;
-		}
-		for (int i = 0; i < button_wrap; i++) {
-			/* activate binding if button state has changed */
-			if (button_pressed[i]!=old_button_state[i]) {
-				if (button_pressed[i]) ActivateBindList(&button_lists[i],32767,true);
-				else DeactivateBindList(&button_lists[i],true);
-				old_button_state[i]=button_pressed[i];
-			}
-		}
-		for (int i = 0; i < axes; i++) {
-			Sint16 caxis_pos = SDL_JoystickGetAxis(sdl_joystick, i);
-			/* activate bindings for joystick position */
-			if (caxis_pos>1) {
-				if (old_neg_axis_state[i]) {
-					DeactivateBindList(&neg_axis_lists[i],false);
-					old_neg_axis_state[i] = false;
-				}
-				ActivateBindList(&pos_axis_lists[i],caxis_pos,false);
-				old_pos_axis_state[i] = true;
-			} else if (caxis_pos<-1) {
-				if (old_pos_axis_state[i]) {
-					DeactivateBindList(&pos_axis_lists[i],false);
-					old_pos_axis_state[i] = false;
-				}
-				if (caxis_pos!=-32768) caxis_pos=(Sint16)abs(caxis_pos);
-				else caxis_pos=32767;
-				ActivateBindList(&neg_axis_lists[i],caxis_pos,false);
-				old_neg_axis_state[i] = true;
-			} else {
-				/* center */
-				if (old_pos_axis_state[i]) {
-					DeactivateBindList(&pos_axis_lists[i],false);
-					old_pos_axis_state[i] = false;
-				}
-				if (old_neg_axis_state[i]) {
-					DeactivateBindList(&neg_axis_lists[i],false);
-					old_neg_axis_state[i] = false;
-				}
-			}
-		}
-		for (int i = 0; i < hats; i++) {
-			assert(i < MAXHAT);
-			const uint8_t chat_state = SDL_JoystickGetHat(sdl_joystick, i);
-
-			/* activate binding if hat state has changed */
-			if ((chat_state & SDL_HAT_UP) != (old_hat_state[i] & SDL_HAT_UP)) {
-				if (chat_state & SDL_HAT_UP) ActivateBindList(&hat_lists[(i<<2)+0],32767,true);
-				else DeactivateBindList(&hat_lists[(i<<2)+0],true);
-			}
-			if ((chat_state & SDL_HAT_RIGHT) != (old_hat_state[i] & SDL_HAT_RIGHT)) {
-				if (chat_state & SDL_HAT_RIGHT) ActivateBindList(&hat_lists[(i<<2)+1],32767,true);
-				else DeactivateBindList(&hat_lists[(i<<2)+1],true);
-			}
-			if ((chat_state & SDL_HAT_DOWN) != (old_hat_state[i] & SDL_HAT_DOWN)) {
-				if (chat_state & SDL_HAT_DOWN) ActivateBindList(&hat_lists[(i<<2)+2],32767,true);
-				else DeactivateBindList(&hat_lists[(i<<2)+2],true);
-			}
-			if ((chat_state & SDL_HAT_LEFT) != (old_hat_state[i] & SDL_HAT_LEFT)) {
-				if (chat_state & SDL_HAT_LEFT) ActivateBindList(&hat_lists[(i<<2)+3],32767,true);
-				else DeactivateBindList(&hat_lists[(i<<2)+3],true);
-			}
-			old_hat_state[i] = chat_state;
-		}
-	}
+        JOYSTICK_Move_X(emustick, virtual_joysticks[emustick].axis_pos[0]);
+        JOYSTICK_Move_Y(emustick, virtual_joysticks[emustick].axis_pos[1]);
+    }
 
 private:
-	CBind * CreateAxisBind(int axis, bool positive)
-	{
-		if (axis < 0 || axis >= axes)
-			return nullptr;
-		if (positive)
-			return new CJAxisBind(&pos_axis_lists[axis],
-			                      this, axis, positive);
-		else
-			return new CJAxisBind(&neg_axis_lists[axis],
-			                      this, axis, positive);
-	}
+    CBind *CreateAxisBind(int axis, bool positive) {
+        if (axis < 0 || axis >= axes)
+            return nullptr;
+        if (positive)
+            return new CJAxisBind(&pos_axis_lists[axis], this, axis, positive);
+        else
+            return new CJAxisBind(&neg_axis_lists[axis], this, axis, positive);
+    }
 
-	CBind * CreateButtonBind(int button)
-	{
-		if (button < 0 || button >= button_wrap)
-			return nullptr;
-		return new CJButtonBind(&button_lists[button],
-		                        this,
-		                        button);
-	}
+    CBind *CreateButtonBind(int button) {
+        if (button < 0 || button >= button_wrap)
+            return nullptr;
+        return new CJButtonBind(&button_lists[button], this, button);
+    }
 
-	CBind *CreateHatBind(uint8_t hat, uint8_t value)
-	{
-		if (is_dummy)
-			return nullptr;
-		assert(hat_lists);
+    CBind *CreateHatBind(uint8_t hat, uint8_t value) {
+        if (is_dummy)
+            return nullptr;
+        assert(hat_lists);
 
-		uint8_t hat_dir;
-		if (value & SDL_HAT_UP)
-			hat_dir = 0;
-		else if (value & SDL_HAT_RIGHT)
-			hat_dir = 1;
-		else if (value & SDL_HAT_DOWN)
-			hat_dir = 2;
-		else if (value & SDL_HAT_LEFT)
-			hat_dir = 3;
-		else
-			return nullptr;
-		return new CJHatBind(&hat_lists[(hat << 2) + hat_dir],
-		                     this, hat, value);
-	}
+        uint8_t hat_dir;
+        if (value & SDL_HAT_UP)
+            hat_dir = 0;
+        else if (value & SDL_HAT_RIGHT)
+            hat_dir = 1;
+        else if (value & SDL_HAT_DOWN)
+            hat_dir = 2;
+        else if (value & SDL_HAT_LEFT)
+            hat_dir = 3;
+        else
+            return nullptr;
+        return new CJHatBind(&hat_lists[(hat << 2) + hat_dir], this, hat, value);
+    }
 
-	const char * ConfigStart() override
-	{
-		return configname;
-	}
+    CBind *CreateMouseMoveBind(int axis, bool positive) {
+        return new CMouseMoveEvent("mousemove", 0, axis, positive);
+    }
 
-	const char * BindStart() override
-	{
-		if (sdl_joystick)
-			return SDL_JoystickNameForIndex(stick_index);
-		else
-			return "[missing joystick]";
-	}
+    const char *ConfigStart() override {
+        return configname;
+    }
 
-	void SetTriggerButtonFor(const char* button_name, const char* sdl_mapping)
-	{
-		// Part of the string we care about is in the format of:
-		// "button_name" + ':' + single character button type (a for axis, b for button, h for hat) + axis number
+    const char *BindStart() override {
+        if (sdl_joystick)
+            return SDL_JoystickNameForIndex(stick_index);
+        else
+            return "[missing joystick]";
+    }
 
-		const char* substring = strstr(sdl_mapping, button_name);
-		if (!substring) {
-			return;
-		}
-		substring += strlen(button_name);
-		if (*substring != 'a') {
-			// Not an axis so no need to do anything
-			return;
-		}
-		++substring;
-		if (!isdigit(*substring)) {
-			// Safety check, this means the string is an invalid format
-			return;
-		}
-		int axis_number = 0;
-		while (isdigit(*substring)) {
-			axis_number *= 10;
-			axis_number += *substring - '0';
-			++substring;
-		}
-		if (axis_number >= 0 && axis_number < MAXAXIS) {
-			is_trigger[axis_number] = true;
-		}
-	}
+    void SetTriggerButtonFor(const char *button_name, const char *sdl_mapping) {
+        const char *substring = strstr(sdl_mapping, button_name);
+        if (!substring) {
+            return;
+        }
+        substring += strlen(button_name);
+        if (*substring != 'a') {
+            return;
+        }
+        ++substring;
+        if (!isdigit(*substring)) {
+            return;
+        }
+        int axis_number = 0;
+        while (isdigit(*substring)) {
+            axis_number *= 10;
+            axis_number += *substring - '0';
+            ++substring;
+        }
+        if (axis_number >= 0 && axis_number < MAXAXIS) {
+            is_trigger[axis_number] = true;
+        }
+    }
 
-	void DetectTriggerButtons()
-	{
-		char* sdl_mapping = SDL_GameControllerMappingForDeviceIndex(stick_index);
-		if (!sdl_mapping) {
-			return;
-		}
-		SetTriggerButtonFor("lefttrigger:", sdl_mapping);
-		SetTriggerButtonFor("righttrigger:", sdl_mapping);
-		SDL_free(sdl_mapping);
-	}
+    void DetectTriggerButtons() {
+        char *sdl_mapping = SDL_GameControllerMappingForDeviceIndex(stick_index);
+        if (!sdl_mapping) {
+            return;
+        }
+        SetTriggerButtonFor("lefttrigger:", sdl_mapping);
+        SetTriggerButtonFor("righttrigger:", sdl_mapping);
+        SDL_free(sdl_mapping);
+    }
 
-	bool is_trigger[MAXAXIS] = {};
+    bool is_trigger[MAXAXIS] = {};
 
 protected:
-	CBindList *pos_axis_lists = nullptr;
-	CBindList *neg_axis_lists = nullptr;
-	CBindList *button_lists = nullptr;
-	CBindList *hat_lists = nullptr;
-	int axes = 0;
-	int emulated_axes = 0;
-	int buttons = 0;
-	int button_cap = 0;
-	int button_wrap = 0;
-	uint8_t emulated_buttons = 0;
-	int hats = 0;
-	int emulated_hats = 0;
-    // Instance ID of the joystick as it appears in SDL events
-	int stick_id{-1};
-	// Index of the joystick in the system
-	int stick_index{-1};
-	uint8_t emustick;
-	SDL_Joystick *sdl_joystick = nullptr;
-	char configname[10];
-	unsigned button_autofire[MAXBUTTON] = {};
-	bool old_button_state[MAXBUTTON] = {};
-	bool old_pos_axis_state[MAXAXIS] = {};
-	bool old_neg_axis_state[MAXAXIS] = {};
-	uint8_t old_hat_state[MAXHAT] = {};
-	bool is_dummy;
+    CBindList *pos_axis_lists = nullptr;
+    CBindList *neg_axis_lists = nullptr;
+    CBindList *button_lists = nullptr;
+    CBindList *hat_lists = nullptr;
+    int axes = 0;
+    int emulated_axes = 0;
+    int buttons = 0;
+    int button_cap = 0;
+    int button_wrap = 0;
+    uint8_t emulated_buttons = 0;
+    int hats = 0;
+    int emulated_hats = 0;
+    int stick_id{-1};
+    int stick_index{-1};
+    uint8_t emustick;
+    SDL_Joystick *sdl_joystick = nullptr;
+    char configname[10];
+    unsigned button_autofire[MAXBUTTON] = {};
+    bool old_button_state[MAXBUTTON] = {};
+    bool old_pos_axis_state[MAXAXIS] = {};
+    bool old_neg_axis_state[MAXAXIS] = {};
+    uint8_t old_hat_state[MAXHAT] = {};
+    bool is_dummy;
 };
 
 std::list<CStickBindGroup *> stickbindgroups;
@@ -1744,133 +1658,157 @@ private:
 
 class CJAxisEvent final : public CContinuousEvent {
 public:
-	CJAxisEvent(const char* const entry, Bitu s, Bitu a, bool p,
-	            CJAxisEvent* op_axis)
-	        : CContinuousEvent(entry),
-	          stick(s),
-	          axis(a),
-	          positive(p),
-	          opposite_axis(op_axis)
-	{
-		if (opposite_axis)
-			opposite_axis->SetOppositeAxis(this);
-	}
+    CJAxisEvent(const char* const entry, Bitu s, Bitu a, bool p, CJAxisEvent* op_axis)
+        : CContinuousEvent(entry),
+          stick(s),
+          axis(a),
+          positive(p),
+          opposite_axis(op_axis)
+    {
+        if (opposite_axis)
+            opposite_axis->SetOppositeAxis(this);
+    }
 
-	CJAxisEvent(const CJAxisEvent&) = delete; // prevent copy
-	CJAxisEvent& operator=(const CJAxisEvent&) = delete; // prevent assignment
+    CJAxisEvent(const CJAxisEvent&) = delete; // prevent copy
+    CJAxisEvent& operator=(const CJAxisEvent&) = delete; // prevent assignment
 
-	void Active(bool /*moved*/) override {
-		virtual_joysticks[stick].axis_pos[axis]=(int16_t)(GetValue()*(positive?1:-1));
-	}
-	Bitu GetActivityCount() override {
-		return activity|opposite_axis->activity;
-	}
-	void RepostActivity() override {
-		/* caring for joystick movement into the opposite direction */
-		opposite_axis->Active(true);
-	}
+    void Active(bool /*moved*/) override {
+        virtual_joysticks[stick].axis_pos[axis] = (int16_t)(GetValue() * (positive ? 1 : -1));
+    }
+    Bitu GetActivityCount() override {
+        return activity | opposite_axis->activity;
+    }
+    void RepostActivity() override {
+        /* caring for joystick movement into the opposite direction */
+        opposite_axis->Active(true);
+    }
 protected:
-	void SetOppositeAxis(CJAxisEvent * _opposite_axis) {
-		opposite_axis=_opposite_axis;
-	}
-	Bitu stick,axis;
-	bool positive;
-	CJAxisEvent * opposite_axis;
+    void SetOppositeAxis(CJAxisEvent * _opposite_axis) {
+        opposite_axis = _opposite_axis;
+    }
+    Bitu stick, axis;
+    bool positive;
+    CJAxisEvent * opposite_axis;
 };
 
 class CJButtonEvent final : public CTriggeredEvent {
 public:
-	CJButtonEvent(const char* const entry, Bitu s, Bitu btn)
-	        : CTriggeredEvent(entry),
-	          stick(s),
-	          button(btn)
-	{}
+    CJButtonEvent(const char* const entry, Bitu s, Bitu btn)
+        : CTriggeredEvent(entry),
+          stick(s),
+          button(btn)
+    {}
 
-	void Active(bool pressed) override
-	{
-		virtual_joysticks[stick].button_pressed[button]=pressed;
-	}
+    void Active(bool pressed) override {
+        virtual_joysticks[stick].button_pressed[button] = pressed;
+    }
 
 protected:
-	Bitu stick,button;
+    Bitu stick, button;
 };
 
 class CJHatEvent final : public CTriggeredEvent {
 public:
-	CJHatEvent(const char* const entry, Bitu s, Bitu h, Bitu d)
-	        : CTriggeredEvent(entry),
-	          stick(s),
-	          hat(h),
-	          dir(d)
-	{}
+    CJHatEvent(const char* const entry, Bitu s, Bitu h, Bitu d)
+        : CTriggeredEvent(entry),
+          stick(s),
+          hat(h),
+          dir(d)
+    {}
 
-	void Active(bool pressed) override
-	{
-		virtual_joysticks[stick].hat_pressed[(hat<<2)+dir]=pressed;
-	}
+    void Active(bool pressed) override {
+        virtual_joysticks[stick].hat_pressed[(hat << 2) + dir] = pressed;
+    }
 
 protected:
-	Bitu stick,hat,dir;
+    Bitu stick, hat, dir;
+};
+
+class CMouseMoveEvent final : public CContinuousEvent {
+public:
+    CMouseMoveEvent(const char* const entry, Bitu stick, Bitu axis, bool positive)
+        : CContinuousEvent(entry),
+          stick(stick),
+          axis(axis),
+          positive(positive)
+    {}
+
+    void Active(bool moved) override {
+        if (moved) {
+            Sint16 value = positive ? mouse_move_value : -mouse_move_value;
+            virtual_joysticks[stick].axis_pos[axis] = value;
+        } else {
+            virtual_joysticks[stick].axis_pos[axis] = 0;
+        }
+    }
+
+    void SetMouseMoveValue(Sint16 value) {
+        mouse_move_value = value;
+    }
+
+private:
+    Bitu stick;
+    Bitu axis;
+    bool positive;
+    Sint16 mouse_move_value = 0;
 };
 
 class CModEvent final : public CTriggeredEvent {
 public:
-	CModEvent(const char* const _entry, int _wmod)
-	        : CTriggeredEvent(_entry),
-	          wmod(_wmod)
-	{}
+    CModEvent(const char* const _entry, int _wmod)
+        : CTriggeredEvent(_entry),
+          wmod(_wmod)
+    {}
 
-	void Active(bool yesno) override
-	{
-		if (yesno)
-			mapper.mods |= (static_cast<Bitu>(1) << (wmod-1));
-		else
-			mapper.mods &= ~(static_cast<Bitu>(1) << (wmod-1));
-	}
+    void Active(bool yesno) override {
+        if (yesno)
+            mapper.mods |= (static_cast<Bitu>(1) << (wmod - 1));
+        else
+            mapper.mods &= ~(static_cast<Bitu>(1) << (wmod - 1));
+    }
 
 protected:
-	int wmod;
+    int wmod;
 };
 
 class CHandlerEvent final : public CTriggeredEvent {
 public:
-	CHandlerEvent(const char *entry,
-	              MAPPER_Handler *handle,
-	              SDL_Scancode k,
-	              uint32_t mod,
-	              const char *bname)
-	        : CTriggeredEvent(entry),
-	          defkey(k),
-	          defmod(mod),
-	          handler(handle),
-	          button_name(bname)
-	{
-		handlergroup.push_back(this);
-	}
+    CHandlerEvent(const char *entry,
+                  MAPPER_Handler *handle,
+                  SDL_Scancode k,
+                  uint32_t mod,
+                  const char *bname)
+        : CTriggeredEvent(entry),
+          defkey(k),
+          defmod(mod),
+          handler(handle),
+          button_name(bname)
+    {
+        handlergroup.push_back(this);
+    }
 
-	~CHandlerEvent() override = default;
-	CHandlerEvent(const CHandlerEvent&) = delete; // prevent copy
-	CHandlerEvent& operator=(const CHandlerEvent&) = delete; // prevent assignment
+    ~CHandlerEvent() override = default;
+    CHandlerEvent(const CHandlerEvent&) = delete; // prevent copy
+    CHandlerEvent& operator=(const CHandlerEvent&) = delete; // prevent assignment
 
-	void Active(bool yesno) override { (*handler)(yesno); }
+    void Active(bool yesno) override { (*handler)(yesno); }
 
-	void MakeDefaultBind(char *buf)
-	{
-		if (defkey == SDL_SCANCODE_UNKNOWN)
-			return;
-		sprintf(buf, "%s \"key %d%s%s%s\"",
-		        entry, static_cast<int>(defkey),
-		        defmod & MMOD1 ? " mod1" : "",
-		        defmod & MMOD2 ? " mod2" : "",
-		        defmod & MMOD3 ? " mod3" : "");
-	}
+    void MakeDefaultBind(char *buf) {
+        if (defkey == SDL_SCANCODE_UNKNOWN)
+            return;
+        sprintf(buf, "%s \"key %d%s%s%s\"",
+                entry, static_cast<int>(defkey),
+                defmod & MMOD1 ? " mod1" : "",
+                defmod & MMOD2 ? " mod2" : "",
+                defmod & MMOD3 ? " mod3" : "");
+    }
 
 protected:
-	SDL_Scancode defkey;
-	uint32_t defmod;
-	MAPPER_Handler * handler;
+    SDL_Scancode defkey;
+    uint32_t defmod;
+    MAPPER_Handler * handler;
 public:
-	std::string button_name;
+    std::string button_name;
 };
 
 static struct {
@@ -2189,290 +2127,171 @@ static CKeyEvent * caps_lock_event=nullptr;
 static CKeyEvent * num_lock_event=nullptr;
 
 static void CreateLayout() {
-	int32_t i;
-	/* Create the buttons for the Keyboard */
-	constexpr int32_t button_width  = 28;
-	constexpr int32_t button_height = 20;
-	constexpr int32_t margin        = 5;
-	constexpr auto pos_x = [](int32_t x) { return x * button_width + margin; };
-	constexpr auto pos_y = [](int32_t y) { return 10 + y * button_height; };
-	AddKeyButtonEvent(pos_x(0), pos_y(0), button_width, button_height, "ESC", "esc", KBD_esc);
-	for (i = 0; i < 12; i++) {
-		AddKeyButtonEvent(pos_x(2 + i), pos_y(0), button_width, button_height, combo_f[i].title, combo_f[i].entry, combo_f[i].key);
-	}
-	for (i = 0; i < 14; i++) {
-		AddKeyButtonEvent(pos_x(i), pos_y(1), button_width, button_height, combo_1[i].title, combo_1[i].entry, combo_1[i].key);
-	}
+    int32_t i;
+    constexpr int32_t button_width = 28;
+    constexpr int32_t button_height = 20;
+    constexpr int32_t margin = 5;
+    constexpr auto pos_x = [](int32_t x) { return x * button_width + margin; };
+    constexpr auto pos_y = [](int32_t y) { return 10 + y * button_height; };
 
-	AddKeyButtonEvent(pos_x(0), pos_y(2), button_width * 2, button_height, "TAB", "tab", KBD_tab);
-	for (i = 0; i < 12; i++) {
-		AddKeyButtonEvent(pos_x(2 + i), pos_y(2), button_width, button_height, combo_2[i].title, combo_2[i].entry, combo_2[i].key);
-	}
+    AddKeyButtonEvent(pos_x(0), pos_y(0), button_width, button_height, "ESC", "esc", KBD_esc);
+    for (i = 0; i < 12; i++) {
+        AddKeyButtonEvent(pos_x(2 + i), pos_y(0), button_width, button_height, combo_f[i].title, combo_f[i].entry, combo_f[i].key);
+    }
+    for (i = 0; i < 14; i++) {
+        AddKeyButtonEvent(pos_x(i), pos_y(1), button_width, button_height, combo_1[i].title, combo_1[i].entry, combo_1[i].key);
+    }
 
-	AddKeyButtonEvent(pos_x(14), pos_y(2), button_width * 2, button_height * 2, "ENTER", "enter", KBD_enter);
+    AddKeyButtonEvent(pos_x(0), pos_y(2), button_width * 2, button_height, "TAB", "tab", KBD_tab);
+    for (i = 0; i < 12; i++) {
+        AddKeyButtonEvent(pos_x(2 + i), pos_y(2), button_width, button_height, combo_2[i].title, combo_2[i].entry, combo_2[i].key);
+    }
 
-	caps_lock_event = AddKeyButtonEvent(pos_x(0), pos_y(3), button_width * 2, button_height, "CLCK", "capslock", KBD_capslock);
-	for (i = 0; i < 12; i++) {
-		AddKeyButtonEvent(pos_x(2 + i), pos_y(3), button_width, button_height, combo_3[i].title, combo_3[i].entry, combo_3[i].key);
-	}
+    AddKeyButtonEvent(pos_x(14), pos_y(2), button_width * 2, button_height * 2, "ENTER", "enter", KBD_enter);
 
-	AddKeyButtonEvent(pos_x(0), pos_y(4), button_width * 2, button_height, "SHIFT", "lshift", KBD_leftshift);
-	for (i = 0; i < 12; i++) {
-		AddKeyButtonEvent(pos_x(2 + i),
-		                  pos_y(4),
-		                  button_width,
-		                  button_height,
-		                  combo_4[i].title,
-		                  combo_4[i].entry,
-		                  combo_4[i].key);
-	}
-	AddKeyButtonEvent(pos_x(14), pos_y(4), button_width * 3, button_height, "SHIFT", "rshift", KBD_rightshift);
+    caps_lock_event = AddKeyButtonEvent(pos_x(0), pos_y(3), button_width * 2, button_height, "CLCK", "capslock", KBD_capslock);
+    for (i = 0; i < 12; i++) {
+        AddKeyButtonEvent(pos_x(2 + i), pos_y(3), button_width, button_height, combo_3[i].title, combo_3[i].entry, combo_3[i].key);
+    }
 
-	/* Bottom Row */
-	AddKeyButtonEvent(pos_x(0), pos_y(5), button_width * 2, button_height, MMOD1_NAME, "lctrl", KBD_leftctrl);
+    AddKeyButtonEvent(pos_x(0), pos_y(4), button_width * 2, button_height, "SHIFT", "lshift", KBD_leftshift);
+    for (i = 0; i < 12; i++) {
+        AddKeyButtonEvent(pos_x(2 + i), pos_y(4), button_width, button_height, combo_4[i].title, combo_4[i].entry, combo_4[i].key);
+    }
+    AddKeyButtonEvent(pos_x(14), pos_y(4), button_width * 3, button_height, "SHIFT", "rshift", KBD_rightshift);
+
+    AddKeyButtonEvent(pos_x(0), pos_y(5), button_width * 2, button_height, MMOD1_NAME, "lctrl", KBD_leftctrl);
 
 #if !defined(MACOSX)
-	AddKeyButtonEvent(pos_x(2), pos_y(5), button_width * 2, button_height, MMOD3_NAME, "lgui", KBD_leftgui);
-	AddKeyButtonEvent(pos_x(4), pos_y(5), button_width * 2, button_height, MMOD2_NAME, "lalt", KBD_leftalt);
+    AddKeyButtonEvent(pos_x(2), pos_y(5), button_width * 2, button_height, MMOD3_NAME, "lgui", KBD_leftgui);
+    AddKeyButtonEvent(pos_x(4), pos_y(5), button_width * 2, button_height, MMOD2_NAME, "lalt", KBD_leftalt);
 #else
-	AddKeyButtonEvent(pos_x(2), pos_y(5), button_width * 2, button_height, MMOD2_NAME, "lalt", KBD_leftalt);
-	AddKeyButtonEvent(pos_x(4), pos_y(5), button_width * 2, button_height, MMOD3_NAME, "lgui", KBD_leftgui);
+    AddKeyButtonEvent(pos_x(2), pos_y(5), button_width * 2, button_height, MMOD2_NAME, "lalt", KBD_leftalt);
+    AddKeyButtonEvent(pos_x(4), pos_y(5), button_width * 2, button_height, MMOD3_NAME, "lgui", KBD_leftgui);
 #endif
 
-	AddKeyButtonEvent(pos_x(6), pos_y(5), button_width * 4, button_height, "SPACE", "space", KBD_space);
+    AddKeyButtonEvent(pos_x(6), pos_y(5), button_width * 4, button_height, "SPACE", "space", KBD_space);
 
 #if !defined(MACOSX)
-	AddKeyButtonEvent(pos_x(10), pos_y(5), button_width * 2, button_height, MMOD2_NAME, "ralt", KBD_rightalt);
-	AddKeyButtonEvent(pos_x(12), pos_y(5), button_width * 2, button_height, MMOD3_NAME, "rgui", KBD_rightgui);
+    AddKeyButtonEvent(pos_x(10), pos_y(5), button_width * 2, button_height, MMOD2_NAME, "ralt", KBD_rightalt);
+    AddKeyButtonEvent(pos_x(12), pos_y(5), button_width * 2, button_height, MMOD3_NAME, "rgui", KBD_rightgui);
 #else
-	AddKeyButtonEvent(pos_x(10), pos_y(5), button_width * 2, button_height, MMOD3_NAME, "rgui", KBD_rightgui);
-	AddKeyButtonEvent(pos_x(12), pos_y(5), button_width * 2, button_height, MMOD2_NAME, "ralt", KBD_rightalt);
+    AddKeyButtonEvent(pos_x(10), pos_y(5), button_width * 2, button_height, MMOD3_NAME, "rgui", KBD_rightgui);
+    AddKeyButtonEvent(pos_x(12), pos_y(5), button_width * 2, button_height, MMOD2_NAME, "ralt", KBD_rightalt);
 #endif
 
-	AddKeyButtonEvent(pos_x(14), pos_y(5), button_width * 2, button_height, MMOD1_NAME, "rctrl", KBD_rightctrl);
+    AddKeyButtonEvent(pos_x(14), pos_y(5), button_width * 2, button_height, MMOD1_NAME, "rctrl", KBD_rightctrl);
 
-	/* Arrow Keys */
-#define XO 17
-#define YO 0
+    AddKeyButtonEvent(pos_x(17), pos_y(0), button_width, button_height, "PRT", "printscreen", KBD_printscreen);
+    AddKeyButtonEvent(pos_x(18), pos_y(0), button_width, button_height, "SCL", "scrolllock", KBD_scrolllock);
+    AddKeyButtonEvent(pos_x(19), pos_y(0), button_width, button_height, "PAU", "pause", KBD_pause);
+    AddKeyButtonEvent(pos_x(17), pos_y(1), button_width, button_height, "INS", "insert", KBD_insert);
+    AddKeyButtonEvent(pos_x(18), pos_y(1), button_width, button_height, "HOM", "home", KBD_home);
+    AddKeyButtonEvent(pos_x(19), pos_y(1), button_width, button_height, "PUP", "pageup", KBD_pageup);
+    AddKeyButtonEvent(pos_x(17), pos_y(2), button_width, button_height, "DEL", "delete", KBD_delete);
+    AddKeyButtonEvent(pos_x(18), pos_y(2), button_width, button_height, "END", "end", KBD_end);
+    AddKeyButtonEvent(pos_x(19), pos_y(2), button_width, button_height, "PDN", "pagedown", KBD_pagedown);
+    AddKeyButtonEvent(pos_x(18), pos_y(4), button_width, button_height, "\x18", "up", KBD_up);
+    AddKeyButtonEvent(pos_x(17), pos_y(5), button_width, button_height, "\x1B", "left", KBD_left);
+    AddKeyButtonEvent(pos_x(18), pos_y(5), button_width, button_height, "\x19", "down", KBD_down);
+    AddKeyButtonEvent(pos_x(19), pos_y(5), button_width, button_height, "\x1A", "right", KBD_right);
 
-	AddKeyButtonEvent(pos_x(XO + 0), pos_y(YO), button_width, button_height, "PRT", "printscreen", KBD_printscreen);
-	AddKeyButtonEvent(pos_x(XO + 1), pos_y(YO), button_width, button_height, "SCL", "scrolllock", KBD_scrolllock);
-	AddKeyButtonEvent(pos_x(XO + 2), pos_y(YO), button_width, button_height, "PAU", "pause", KBD_pause);
-	AddKeyButtonEvent(pos_x(XO + 0), pos_y(YO + 1), button_width, button_height, "INS", "insert", KBD_insert);
-	AddKeyButtonEvent(pos_x(XO + 1), pos_y(YO + 1), button_width, button_height, "HOM", "home", KBD_home);
-	AddKeyButtonEvent(pos_x(XO + 2), pos_y(YO + 1), button_width, button_height, "PUP", "pageup", KBD_pageup);
-	AddKeyButtonEvent(pos_x(XO + 0), pos_y(YO + 2), button_width, button_height, "DEL", "delete", KBD_delete);
-	AddKeyButtonEvent(pos_x(XO + 1), pos_y(YO + 2), button_width, button_height, "END", "end", KBD_end);
-	AddKeyButtonEvent(pos_x(XO + 2), pos_y(YO + 2), button_width, button_height, "PDN", "pagedown", KBD_pagedown);
-	AddKeyButtonEvent(pos_x(XO + 1), pos_y(YO + 4), button_width, button_height, "\x18", "up", KBD_up);
-	AddKeyButtonEvent(pos_x(XO + 0), pos_y(YO + 5), button_width, button_height, "\x1B", "left", KBD_left);
-	AddKeyButtonEvent(pos_x(XO + 1), pos_y(YO + 5), button_width, button_height, "\x19", "down", KBD_down);
-	AddKeyButtonEvent(pos_x(XO + 2), pos_y(YO + 5), button_width, button_height, "\x1A", "right", KBD_right);
-#undef XO
-#undef YO
-#define XO 0
-#define YO 7
-	/* Numeric KeyPad */
-	num_lock_event = AddKeyButtonEvent(pos_x(XO), pos_y(YO), button_width, button_height, "NUM", "numlock", KBD_numlock);
-	AddKeyButtonEvent(pos_x(XO + 1), pos_y(YO), button_width, button_height, "/", "kp_divide", KBD_kpdivide);
-	AddKeyButtonEvent(pos_x(XO + 2), pos_y(YO), button_width, button_height, "*", "kp_multiply", KBD_kpmultiply);
-	AddKeyButtonEvent(pos_x(XO + 3), pos_y(YO), button_width, button_height, "-", "kp_minus", KBD_kpminus);
-	AddKeyButtonEvent(pos_x(XO + 0), pos_y(YO + 1), button_width, button_height, "7", "kp_7", KBD_kp7);
-	AddKeyButtonEvent(pos_x(XO + 1), pos_y(YO + 1), button_width, button_height, "8", "kp_8", KBD_kp8);
-	AddKeyButtonEvent(pos_x(XO + 2), pos_y(YO + 1), button_width, button_height, "9", "kp_9", KBD_kp9);
-	AddKeyButtonEvent(pos_x(XO + 3), pos_y(YO + 1), button_width, button_height * 2, "+", "kp_plus", KBD_kpplus);
-	AddKeyButtonEvent(pos_x(XO), pos_y(YO + 2), button_width, button_height, "4", "kp_4", KBD_kp4);
-	AddKeyButtonEvent(pos_x(XO + 1), pos_y(YO + 2), button_width, button_height, "5", "kp_5", KBD_kp5);
-	AddKeyButtonEvent(pos_x(XO + 2), pos_y(YO + 2), button_width, button_height, "6", "kp_6", KBD_kp6);
-	AddKeyButtonEvent(pos_x(XO + 0), pos_y(YO + 3), button_width, button_height, "1", "kp_1", KBD_kp1);
-	AddKeyButtonEvent(pos_x(XO + 1), pos_y(YO + 3), button_width, button_height, "2", "kp_2", KBD_kp2);
-	AddKeyButtonEvent(pos_x(XO + 2), pos_y(YO + 3), button_width, button_height, "3", "kp_3", KBD_kp3);
-	AddKeyButtonEvent(pos_x(XO + 3), pos_y(YO + 3), button_width, button_height * 2, "ENT", "kp_enter", KBD_kpenter);
-	AddKeyButtonEvent(pos_x(XO), pos_y(YO + 4), button_width * 2, button_height, "0", "kp_0", KBD_kp0);
-	AddKeyButtonEvent(pos_x(XO + 2), pos_y(YO + 4), button_width, button_height, ".", "kp_period", KBD_kpperiod);
+    AddKeyButtonEvent(pos_x(0), pos_y(7), button_width, button_height, "NUM", "numlock", KBD_numlock);
+    AddKeyButtonEvent(pos_x(1), pos_y(7), button_width, button_height, "/", "kp_divide", KBD_kpdivide);
+    AddKeyButtonEvent(pos_x(2), pos_y(7), button_width, button_height, "*", "kp_multiply", KBD_kpmultiply);
+    AddKeyButtonEvent(pos_x(3), pos_y(7), button_width, button_height, "-", "kp_minus", KBD_kpminus);
+    AddKeyButtonEvent(pos_x(0), pos_y(8), button_width, button_height, "7", "kp_7", KBD_kp7);
+    AddKeyButtonEvent(pos_x(1), pos_y(8), button_width, button_height, "8", "kp_8", KBD_kp8);
+    AddKeyButtonEvent(pos_x(2), pos_y(8), button_width, button_height, "9", "kp_9", KBD_kp9);
+    AddKeyButtonEvent(pos_x(3), pos_y(8), button_width, button_height * 2, "+", "kp_plus", KBD_kpplus);
+    AddKeyButtonEvent(pos_x(0), pos_y(9), button_width, button_height, "4", "kp_4", KBD_kp4);
+    AddKeyButtonEvent(pos_x(1), pos_y(9), button_width, button_height, "5", "kp_5", KBD_kp5);
+    AddKeyButtonEvent(pos_x(2), pos_y(9), button_width, button_height, "6", "kp_6", KBD_kp6);
+    AddKeyButtonEvent(pos_x(0), pos_y(10), button_width, button_height, "1", "kp_1", KBD_kp1);
+    AddKeyButtonEvent(pos_x(1), pos_y(10), button_width, button_height, "2", "kp_2", KBD_kp2);
+    AddKeyButtonEvent(pos_x(2), pos_y(10), button_width, button_height, "3", "kp_3", KBD_kp3);
+    AddKeyButtonEvent(pos_x(3), pos_y(10), button_width, button_height * 2, "ENT", "kp_enter", KBD_kpenter);
+    AddKeyButtonEvent(pos_x(0), pos_y(11), button_width * 2, button_height, "0", "kp_0", KBD_kp0);
+    AddKeyButtonEvent(pos_x(2), pos_y(11), button_width, button_height, ".", "kp_period", KBD_kpperiod);
 
-#undef XO
-#undef YO
+    AddMouseButtonEvent(pos_x(5), pos_y(8), button_width, button_height, "L", "mouse_left", MouseButtonId::Left);
+    AddMouseButtonEvent(pos_x(6), pos_y(8), button_width, button_height, "M", "mouse_middle", MouseButtonId::Middle);
+    AddMouseButtonEvent(pos_x(7), pos_y(8), button_width, button_height, "R", "mouse_right", MouseButtonId::Right);
 
-#define XO 5
-#define YO 8
-	/* Mouse Buttons */
-	new CTextButton(pos_x(XO + 0), pos_y(YO - 1), 3 * button_width, 20, "Mouse");
+    AddJButtonButton(pos_x(10), pos_y(7), button_width, button_height, "1", 0, 0);
+    AddJButtonButton(pos_x(12), pos_y(7), button_width, button_height, "2", 0, 1);
+    CJAxisEvent *cjaxis = AddJAxisButton(pos_x(11), pos_y(7), button_width, button_height, "Y-", 0, 1, false, nullptr);
+    AddJAxisButton(pos_x(11), pos_y(8), button_width, button_height, "Y+", 0, 1, true, cjaxis);
+    cjaxis = AddJAxisButton(pos_x(10), pos_y(8), button_width, button_height, "X-", 0, 0, false, nullptr);
+    AddJAxisButton(pos_x(12), pos_y(8), button_width, button_height, "X+", 0, 0, true, cjaxis);
 
-	AddMouseButtonEvent(pos_x(XO + 0),
-	                    pos_y(YO),
-	                    button_width,
-	                    button_height,
-	                    "L",
-	                    "mouse_left",
-	                    MouseButtonId::Left);
+    if (joytype == JOY_2AXIS) {
+        AddJButtonButton(pos_x(14), pos_y(7), button_width, button_height, "1", 1, 0);
+        AddJButtonButton(pos_x(16), pos_y(7), button_width, button_height, "2", 1, 1);
+        cjaxis = AddJAxisButton(pos_x(14), pos_y(8), button_width, button_height, "X-", 1, 0, false, nullptr);
+        CJAxisEvent *tmp_ptr = AddJAxisButton(pos_x(16), pos_y(8), button_width, button_height, "X+", 1, 0, true, cjaxis);
+        (void)tmp_ptr;
+        cjaxis = AddJAxisButton(pos_x(15), pos_y(7), button_width, button_height, "Y-", 1, 1, false, nullptr);
+        tmp_ptr = AddJAxisButton(pos_x(15), pos_y(8), button_width, button_height, "Y+", 1, 1, true, cjaxis);
+        (void)tmp_ptr;
+    } else {
+        AddJButtonButton(pos_x(14), pos_y(7), button_width, button_height, "3", 0, 2);
+        AddJButtonButton(pos_x(16), pos_y(7), button_width, button_height, "4", 0, 3);
+        cjaxis = AddJAxisButton(pos_x(14), pos_y(8), button_width, button_height, "X-", 0, 2, false, nullptr);
+        CJAxisEvent *tmp_ptr = AddJAxisButton(pos_x(16), pos_y(8), button_width, button_height, "X+", 0, 2, true, cjaxis);
+        (void)tmp_ptr;
+        cjaxis = AddJAxisButton(pos_x(15), pos_y(7), button_width, button_height, "Y-", 0, 3, false, nullptr);
+        tmp_ptr = AddJAxisButton(pos_x(15), pos_y(8), button_width, button_height, "Y+", 0, 3, true, cjaxis);
+        (void)tmp_ptr;
+    }
 
-	AddMouseButtonEvent(pos_x(XO + 1),
-	                    pos_y(YO),
-	                    button_width,
-	                    button_height,
-	                    "M",
-	                    "mouse_middle",
-	                    MouseButtonId::Middle);
+    if (joytype == JOY_CH) {
+        AddJButtonButton(pos_x(18), pos_y(7), button_width, button_height, "5", 0, 4);
+        AddJButtonButton(pos_x(20), pos_y(7), button_width, button_height, "6", 0, 5);
+    } else {
+        AddJButtonButton_hidden(0, 4);
+        AddJButtonButton_hidden(0, 5);
+    }
 
-	AddMouseButtonEvent(pos_x(XO + 2),
-	                    pos_y(YO),
-	                    button_width,
-	                    button_height,
-	                    "R",
-	                    "mouse_right",
-	                    MouseButtonId::Right);
-#undef XO
-#undef YO
+    AddJHatButton(pos_x(18), pos_y(7), button_width, button_height, "UP", 0, 0, 0);
+    AddJHatButton(pos_x(17), pos_y(8), button_width, button_height, "LFT", 0, 0, 3);
+    AddJHatButton(pos_x(18), pos_y(8), button_width, button_height, "DWN", 0, 0, 2);
+    AddJHatButton(pos_x(19), pos_y(8), button_width, button_height, "RGT", 0, 0, 1);
 
-#define XO 10
-#define YO 7
-	/* Joystick Buttons/Texts */
-	/* Buttons 1+2 of 1st Joystick */
-	AddJButtonButton(pos_x(XO), pos_y(YO), button_width, button_height, "1", 0, 0);
-	AddJButtonButton(pos_x(XO + 2), pos_y(YO), button_width, button_height, "2", 0, 1);
-	/* Axes 1+2 (X+Y) of 1st Joystick */
-	CJAxisEvent* cjaxis = AddJAxisButton(pos_x(XO + 1), pos_y(YO), button_width, button_height, "Y-", 0, 1, false, nullptr);
-	AddJAxisButton(pos_x(XO + 1), pos_y(YO + 1), button_width, button_height, "Y+", 0, 1, true, cjaxis);
-	cjaxis = AddJAxisButton(pos_x(XO), pos_y(YO + 1), button_width, button_height, "X-", 0, 0, false, nullptr);
-	AddJAxisButton(pos_x(XO + 2), pos_y(YO + 1), button_width, button_height, "X+", 0, 0, true, cjaxis);
+    AddModButton(pos_x(0), pos_y(14), 50, 20, "Mod1", 1);
+    AddModButton(pos_x(2), pos_y(14), 50, 20, "Mod2", 2);
+    AddModButton(pos_x(4), pos_y(14), 50, 20, "Mod3", 3);
 
-	CJAxisEvent * tmp_ptr;
+    int32_t xpos = 0;
+    int32_t ypos = 10;
+    constexpr auto bw = button_width + 5;
+    for (const auto &handler_event : handlergroup) {
+        new CEventButton(200 + xpos * 3 * bw, pos_y(ypos), bw * 3, button_height, handler_event->button_name.c_str(), handler_event);
+        xpos++;
+        if (xpos > 3) {
+            xpos = 0;
+            ypos++;
+        }
+    }
 
-	assert(joytype != JOY_UNSET);
-	if (joytype == JOY_2AXIS) {
-		/* Buttons 1+2 of 2nd Joystick */
-		AddJButtonButton(pos_x(XO + 4), pos_y(YO), button_width, button_height, "1", 1, 0);
-		AddJButtonButton(pos_x(XO + 4 + 2), pos_y(YO), button_width, button_height, "2", 1, 1);
-		/* Buttons 3+4 of 1st Joystick, not accessible */
-		AddJButtonButton_hidden(0,2);
-		AddJButtonButton_hidden(0,3);
+    bind_but.action = new CCaptionButton(0, 335, 0, 0);
 
-		/* Axes 1+2 (X+Y) of 2nd Joystick */
-		cjaxis  = AddJAxisButton(pos_x(XO + 4), pos_y(YO + 1), button_width, button_height, "X-", 1, 0, false, nullptr);
-		tmp_ptr = AddJAxisButton(pos_x(XO + 4 + 2), pos_y(YO + 1), button_width, button_height, "X+", 1, 0, true, cjaxis);
-		(void)tmp_ptr;
-		cjaxis  = AddJAxisButton(pos_x(XO + 4 + 1), pos_y(YO + 0), button_width, button_height, "Y-", 1, 1, false, nullptr);
-		tmp_ptr = AddJAxisButton(pos_x(XO + 4 + 1), pos_y(YO + 1), button_width, button_height, "Y+", 1, 1, true, cjaxis);
-		(void)tmp_ptr;
-		/* Axes 3+4 (X+Y) of 1st Joystick, not accessible */
-		cjaxis  = AddJAxisButton_hidden(0, 2, false, nullptr);
-		tmp_ptr = AddJAxisButton_hidden(0, 2, true, cjaxis);
-		(void)tmp_ptr;
-		cjaxis  = AddJAxisButton_hidden(0, 3, false, nullptr);
-		tmp_ptr = AddJAxisButton_hidden(0, 3, true, cjaxis);
-		(void)tmp_ptr;
-	} else {
-		/* Buttons 3+4 of 1st Joystick */
-		AddJButtonButton(pos_x(XO + 4), pos_y(YO), button_width, button_height, "3", 0, 2);
-		AddJButtonButton(pos_x(XO + 4 + 2), pos_y(YO), button_width, button_height, "4", 0, 3);
-		/* Buttons 1+2 of 2nd Joystick, not accessible */
-		AddJButtonButton_hidden(1, 0);
-		AddJButtonButton_hidden(1, 1);
+    bind_but.event_title = new CCaptionButton(0, 350, 0, 0);
+    bind_but.bind_title = new CCaptionButton(0, 365, 0, 0);
 
-		/* Axes 3+4 (X+Y) of 1st Joystick */
-		cjaxis  = AddJAxisButton(pos_x(XO + 4), pos_y(YO + 1), button_width, button_height, "X-", 0, 2, false, nullptr);
-		tmp_ptr = AddJAxisButton(pos_x(XO + 4 + 2), pos_y(YO + 1), button_width, button_height, "X+", 0, 2, true, cjaxis);
-		(void)tmp_ptr;
-		cjaxis  = AddJAxisButton(pos_x(XO + 4 + 1), pos_y(YO + 0), button_width, button_height, "Y-", 0, 3, false, nullptr);
-		tmp_ptr = AddJAxisButton(pos_x(XO + 4 + 1), pos_y(YO + 1), button_width, button_height, "Y+", 0, 3, true, cjaxis);
-		(void)tmp_ptr;
-		/* Axes 1+2 (X+Y) of 2nd Joystick , not accessible*/
-		cjaxis  = AddJAxisButton_hidden(1, 0, false, nullptr);
-		tmp_ptr = AddJAxisButton_hidden(1, 0, true, cjaxis);
-		(void)tmp_ptr;
-		cjaxis  = AddJAxisButton_hidden(1, 1, false, nullptr);
-		tmp_ptr = AddJAxisButton_hidden(1, 1, true, cjaxis);
-		(void)tmp_ptr;
-	}
+    bind_but.mod1 = new CCheckButton(20, 410, 110, 20, "Mod1", BC_Mod1);
+    bind_but.mod2 = new CCheckButton(20, 432, 110, 20, "Mod2", BC_Mod2);
+    bind_but.mod3 = new CCheckButton(20, 454, 110, 20, "Mod3", BC_Mod3);
+    bind_but.hold = new CCheckButton(150, 410, 60, 20, "Hold", BC_Hold);
 
-	if (joytype == JOY_CH) {
-		/* Buttons 5+6 of 1st Joystick */
-		AddJButtonButton(pos_x(XO + 8), pos_y(YO), button_width, button_height, "5", 0, 4);
-		AddJButtonButton(pos_x(XO + 8 + 2), pos_y(YO), button_width, button_height, "6", 0, 5);
-	} else {
-		/* Buttons 5+6 of 1st Joystick, not accessible */
-		AddJButtonButton_hidden(0, 4);
-		AddJButtonButton_hidden(0, 5);
-	}
+    bind_but.add = new CBindButton(250, 380, 100, 20, "Add bind", BB_Add);
+    bind_but.del = new CBindButton(250, 400, 100, 20, "Remove bind", BB_Del);
+    bind_but.next = new CBindButton(250, 420, 100, 20, "Next bind", BB_Next);
 
-	/* Hat directions up, left, down, right */
-	AddJHatButton(pos_x(XO + 8 + 1), pos_y(YO), button_width, button_height, "UP", 0, 0, 0);
-	AddJHatButton(pos_x(XO + 8 + 0), pos_y(YO + 1), button_width, button_height, "LFT", 0, 0, 3);
-	AddJHatButton(pos_x(XO + 8 + 1), pos_y(YO + 1), button_width, button_height, "DWN", 0, 0, 2);
-	AddJHatButton(pos_x(XO + 8 + 2), pos_y(YO + 1), button_width, button_height, "RGT", 0, 0, 1);
+    bind_but.save = new CBindButton(400, 450, 50, 20, "Save", BB_Save);
+    bind_but.exit = new CBindButton(450, 450, 50, 20, "Exit", BB_Exit);
 
-	/* Labels for the joystick */
-	CTextButton * btn;
-	if (joytype == JOY_2AXIS) {
-		new CTextButton(pos_x(XO + 0), pos_y(YO - 1), 3 * button_width, 20, "Joystick 1");
-		new CTextButton(pos_x(XO + 4), pos_y(YO - 1), 3 * button_width, 20, "Joystick 2");
-		btn = new CTextButton(pos_x(XO + 8), pos_y(YO - 1), 3 * button_width, 20, "Disabled");
-		btn->SetColor(color_grey);
-	} else if(joytype == JOY_4AXIS || joytype == JOY_4AXIS_2) {
-		new CTextButton(pos_x(XO + 0), pos_y(YO - 1), 3 * button_width, 20, "Axis 1/2");
-		new CTextButton(pos_x(XO + 4), pos_y(YO - 1), 3 * button_width, 20, "Axis 3/4");
-		btn = new CTextButton(pos_x(XO + 8), pos_y(YO - 1), 3 * button_width, 20, "Disabled");
-		btn->SetColor(color_grey);
-	} else if(joytype == JOY_CH) {
-		new CTextButton(pos_x(XO + 0), pos_y(YO - 1), 3 * button_width, 20, "Axis 1/2");
-		new CTextButton(pos_x(XO + 4), pos_y(YO - 1), 3 * button_width, 20, "Axis 3/4");
-		new CTextButton(pos_x(XO + 8), pos_y(YO - 1), 3 * button_width, 20, "Hat/D-pad");
-	} else if ( joytype == JOY_FCS) {
-		new CTextButton(pos_x(XO + 0), pos_y(YO - 1), 3 * button_width, 20, "Axis 1/2");
-		new CTextButton(pos_x(XO + 4), pos_y(YO - 1), 3 * button_width, 20, "Axis 3");
-		new CTextButton(pos_x(XO + 8), pos_y(YO - 1), 3 * button_width, 20, "Hat/D-pad");
-	} else if (joytype == JOY_DISABLED) {
-		btn = new CTextButton(pos_x(XO + 0), pos_y(YO - 1), 3 * button_width, 20, "Disabled");
-		btn->SetColor(color_grey);
-		btn = new CTextButton(pos_x(XO + 4), pos_y(YO - 1), 3 * button_width, 20, "Disabled");
-		btn->SetColor(color_grey);
-		btn = new CTextButton(pos_x(XO + 8), pos_y(YO - 1), 3 * button_width, 20, "Disabled");
-		btn->SetColor(color_grey);
-	}
-
-	/* The modifier buttons */
-	AddModButton(pos_x(0), pos_y(14), 50, 20, "Mod1", 1);
-	AddModButton(pos_x(2), pos_y(14), 50, 20, "Mod2", 2);
-	AddModButton(pos_x(4), pos_y(14), 50, 20, "Mod3", 3);
-
-	/* Create Handler buttons */
-	int32_t xpos = 0;
-	int32_t ypos = 10;
-	constexpr auto bw = button_width + 5;
-	for (const auto &handler_event : handlergroup) {
-		new CEventButton(200 + xpos * 3 * bw, pos_y(ypos), bw * 3, button_height,
-		                 handler_event->button_name.c_str(), handler_event);
-		xpos++;
-		if (xpos>3) {
-			xpos = 0;
-			ypos++;
-		}
-	}
-	/* Create some text buttons */
-//	new CTextButton(pos_x(6), 0, 124, 20, "Keyboard Layout");
-//	new CTextButton(pos_x(17), 0, 124, 20, "Joystick Layout");
-
-	bind_but.action = new CCaptionButton(0, 335, 0, 0);
-
-	bind_but.event_title=new CCaptionButton(0,350,0,0);
-	bind_but.bind_title=new CCaptionButton(0,365,0,0);
-
-	/* Create binding support buttons */
-
-	bind_but.mod1 = new CCheckButton(20, 410, 110, 20, "Mod1", BC_Mod1);
-	bind_but.mod2 = new CCheckButton(20, 432, 110, 20, "Mod2", BC_Mod2);
-	bind_but.mod3 = new CCheckButton(20, 454, 110, 20, "Mod3", BC_Mod3);
-	bind_but.hold = new CCheckButton(150, 410, 60, 20, "Hold", BC_Hold);
-
-	bind_but.add = new CBindButton(250, 380, 100, 20, "Add bind", BB_Add);
-	bind_but.del = new CBindButton(250, 400, 100, 20, "Remove bind", BB_Del);
-	bind_but.next = new CBindButton(250, 420, 100, 20, "Next bind", BB_Next);
-
-	bind_but.save=new CBindButton(400,450,50,20,"Save",BB_Save);
-	bind_but.exit=new CBindButton(450,450,50,20,"Exit",BB_Exit);
-
-	bind_but.bind_title->Change("Bind Title");
+    bind_but.bind_title->Change("Bind Title");
 }
 
 static void CreateStringBind(char * line) {
@@ -2785,94 +2604,81 @@ void MAPPER_CheckEvent(SDL_Event *event)
 }
 
 void BIND_MappingEvents() {
-	SDL_Event event;
-	static bool isButtonPressed = false;
-	static CButton *lastHoveredButton = nullptr;
-	while (SDL_PollEvent(&event)) {
-		switch (event.type) {
-		case SDL_MOUSEBUTTONDOWN:
-			isButtonPressed = true;
-			/* Further check where are we pointing at right now */
-			[[fallthrough]];
-		case SDL_MOUSEMOTION:
-			if (!isButtonPressed)
-				break;
-			/* Maybe we have been pointing at a specific button for
-			 * a little while  */
-			if (lastHoveredButton) {
-				/* Check if there's any change */
-				if (lastHoveredButton->OnTop(event.button.x,event.button.y))
-					break;
-				/* Not pointing at given button anymore */
-				if (lastHoveredButton == last_clicked)
-					lastHoveredButton->Click();
-				else
-					lastHoveredButton->BindColor();
-				mapper.redraw = true;
-				lastHoveredButton = nullptr;
-			}
-			/* Check which button are we currently pointing at */
-			for (const auto& button : buttons) {
-				if (dynamic_cast<CClickableTextButton*>(button.get()) &&
-				    button->OnTop(event.button.x, event.button.y)) {
-					button->SetColor(color_red);
-					mapper.redraw     = true;
-					lastHoveredButton = button.get();
-					break;
-				}
-			}
-			break;
-		case SDL_MOUSEBUTTONUP:
-			isButtonPressed = false;
-			if (lastHoveredButton) {
-				/* For most buttons the actual new color is going to be green; But not for a few others. */
-				lastHoveredButton->BindColor();
-				mapper.redraw = true;
-				lastHoveredButton = nullptr;
-			}
-			/* Check the press */
-			for (const auto& button : buttons) {
-				if (dynamic_cast<CClickableTextButton*>(button.get()) &&
-				    button->OnTop(event.button.x, event.button.y)) {
-					button->Click();
-					break;
-				}
-			}
-			SetActiveBind(mapper.abind); // force redraw key binding
-			                             // description
-			break;
-		case SDL_WINDOWEVENT:
-			/* The resize event MAY arrive e.g. when the mapper is
-			 * toggled, at least on X11. Furthermore, the restore
-			 * event should be handled on Android.
-			 */
-			if ((event.window.event == SDL_WINDOWEVENT_RESIZED) ||
-			    (event.window.event == SDL_WINDOWEVENT_RESTORED)) {
-				GFX_UpdateDisplayDimensions(event.window.data1,
-				                            event.window.data2);
-				SDL_RenderSetLogicalSize(mapper.renderer, 640, 480);
-				mapper.redraw = true;
-			}
-			if (event.window.event == SDL_WINDOWEVENT_EXPOSED) {
-				mapper.redraw = true;
-			}
-			break;
-		case SDL_QUIT:
-			isButtonPressed = false;
-			lastHoveredButton = nullptr;
-			mapper.exit=true;
-			break;
-		default:
-			if (mapper.addbind) for (CBindGroup_it it = bindgroups.begin(); it != bindgroups.end(); ++it) {
-				CBind * newbind=(*it)->CreateEventBind(&event);
-				if (!newbind) continue;
-				mapper.aevent->AddBind(newbind);
-				SetActiveEvent(mapper.aevent);
-				mapper.addbind=false;
-				break;
-			}
-		}
-	}
+    SDL_Event event;
+    static bool isButtonPressed = false;
+    static CButton *lastHoveredButton = nullptr;
+    while (SDL_PollEvent(&event)) {
+        switch (event.type) {
+            case SDL_MOUSEBUTTONDOWN:
+                isButtonPressed = true;
+                [[fallthrough]];
+            case SDL_MOUSEMOTION:
+                if (!isButtonPressed)
+                    break;
+                if (lastHoveredButton) {
+                    if (lastHoveredButton->OnTop(event.button.x, event.button.y))
+                        break;
+                    if (lastHoveredButton == last_clicked)
+                        lastHoveredButton->Click();
+                    else
+                        lastHoveredButton->BindColor();
+                    mapper.redraw = true;
+                    lastHoveredButton = nullptr;
+                }
+                for (const auto &button : buttons) {
+                    if (dynamic_cast<CClickableTextButton *>(button.get()) &&
+                        button->OnTop(event.button.x, event.button.y)) {
+                        button->SetColor(color_red);
+                        mapper.redraw = true;
+                        lastHoveredButton = button.get();
+                        break;
+                    }
+                }
+                break;
+            case SDL_MOUSEBUTTONUP:
+                isButtonPressed = false;
+                if (lastHoveredButton) {
+                    lastHoveredButton->BindColor();
+                    mapper.redraw = true;
+                    lastHoveredButton = nullptr;
+                }
+                for (const auto &button : buttons) {
+                    if (dynamic_cast<CClickableTextButton *>(button.get()) &&
+                        button->OnTop(event.button.x, event.button.y)) {
+                        button->Click();
+                        break;
+                    }
+                }
+                SetActiveBind(mapper.abind); // force redraw key binding
+                // description
+                break;
+            case SDL_WINDOWEVENT:
+                if ((event.window.event == SDL_WINDOWEVENT_RESIZED) ||
+                    (event.window.event == SDL_WINDOWEVENT_RESTORED)) {
+                    GFX_UpdateDisplayDimensions(event.window.data1, event.window.data2);
+                    SDL_RenderSetLogicalSize(mapper.renderer, 640, 480);
+                    mapper.redraw = true;
+                }
+                if (event.window.event == SDL_WINDOWEVENT_EXPOSED) {
+                    mapper.redraw = true;
+                }
+                break;
+            case SDL_QUIT:
+                isButtonPressed = false;
+                lastHoveredButton = nullptr;
+                mapper.exit = true;
+                break;
+            default:
+                if (mapper.addbind) for (CBindGroup_it it = bindgroups.begin(); it != bindgroups.end(); ++it) {
+                    CBind *newbind = (*it)->CreateEventBind(&event);
+                    if (!newbind) continue;
+                    mapper.aevent->AddBind(newbind);
+                    SetActiveEvent(mapper.aevent);
+                    mapper.addbind = false;
+                    break;
+                }
+        }
+    }
 }
 
 //  Initializes SDL's joystick subsystem an setups up initial joystick settings.
