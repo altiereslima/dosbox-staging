@@ -77,6 +77,13 @@ jobs:
           ${{ env.VCPKG_ROOT }}\vcpkg.exe integrate install
           if (-not $?) { throw "vcpkg failed to integrate packages" }
 
+      - name: Verify vcpkg installation
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -Path "${{ env.VCPKG_ROOT }}\installed\${{ matrix.conf.arch }}-windows")) {
+            throw "vcpkg installation for ${{ matrix.conf.arch }}-windows not found."
+          }
+
       - name: Log environment
         shell: pwsh
         run: .\scripts\log-env.ps1
@@ -96,7 +103,12 @@ jobs:
       - name: Print VCPKG error log
         if: failure()
         shell: pwsh
-        run: Get-Content -Path vcpkg_installed/${{ matrix.conf.arch }}-windows/vcpkg/issue_body.md
+        run: |
+          if (Test-Path -Path "${{ env.VCPKG_ROOT }}\installed\${{ matrix.conf.arch }}-windows\vcpkg\issue_body.md") {
+            Get-Content -Path "${{ env.VCPKG_ROOT }}\installed\${{ matrix.conf.arch }}-windows\vcpkg\issue_body.md"
+          } else {
+            Write-Host "No vcpkg error log found."
+          }
 
       - name: Summarize warnings
         shell: pwsh
@@ -154,6 +166,13 @@ jobs:
           ${{ env.VCPKG_ROOT }}\vcpkg.exe integrate install
           if (-not $?) { throw "vcpkg failed to integrate packages" }
 
+      - name: Verify vcpkg installation
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -Path "${{ env.VCPKG_ROOT }}\installed\${{ matrix.conf.arch }}-windows")) {
+            throw "vcpkg installation for ${{ matrix.conf.arch }}-windows not found."
+          }
+
       - name: Log environment
         shell: pwsh
         run: .\scripts\log-env.ps1
@@ -193,7 +212,12 @@ jobs:
       - name: Print VCPKG error log
         if: failure()
         shell: pwsh
-        run: Get-Content -Path vcpkg_installed/${{ matrix.conf.arch }}-windows/vcpkg/issue_body.md
+        run: |
+          if (Test-Path -Path "${{ env.VCPKG_ROOT }}\installed\${{ matrix.conf.arch }}-windows\vcpkg\issue_body.md") {
+            Get-Content -Path "${{ env.VCPKG_ROOT }}\installed\${{ matrix.conf.arch }}-windows\vcpkg\issue_body.md"
+          } else {
+            Write-Host "No vcpkg error log found."
+          }
 
       - name: Package standard build
         if: ${{ !matrix.debugger }}
